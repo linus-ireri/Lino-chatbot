@@ -111,11 +111,12 @@ exports.handler = async function (event, context) {
             }
           );
 
+          
           answer = response.data.choices?.[0]?.message?.content?.trim();
           console.log(`API success on attempt ${attempt + 1}`);
           break; // Success, exit retry loop
         } catch (error) {
-          lastError = error;
+          lastError = error;git
           const statusCode = error.response?.status;
           
           console.error(`Attempt ${attempt + 1} failed - Status: ${statusCode}, Error: ${error.message}`);
