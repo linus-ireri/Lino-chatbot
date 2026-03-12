@@ -197,7 +197,12 @@ exports.handler = async function (event, context) {
         body: JSON.stringify({
           reply: "I'm experiencing some technical difficulties right now. Please try again in a moment.",
           context: [],
-          source: "error-fallback"
+          source: "error-fallback",
+          error: {
+            message: llmError.message,
+            status: llmError.response?.status,
+            data: llmError.response?.data,
+          },
         }),
       };
     }
