@@ -68,16 +68,56 @@ exports.handler = async function (event, context) {
       "who was mathematics club chairman": "Linus was the chairman of the Mathematics Club from 2021 to 2023."
     };
 
-    // Combine all dictionary information
+    // First try to answer using built-in rule-based responses
+    const possibleReplies = [];
+
+    const tryMatchFrom = (entries) => {
+      for (const [key, value] of Object.entries(entries)) {
+        const normKey = normalize(key);
+        if (
+          normalizedMessage === normKey ||
+          normalizedMessage.includes(normKey) ||
+          normKey.includes(normalizedMessage)
+        ) {
+          possibleReplies.push(value);
+        }
+      }
+    };
+
+    tryMatchFrom(greetingResponses);
+    tryMatchFrom(linoAIResponses);
+
+    if (possibleReplies.length > 0) {
+      return {
+        statusCode: 200,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reply: possibleReplies.join(" "),
+          context: [],
+          source: "rules",
+        }),
+      };
+    }
+
+    // Combine all dictionary information (used as background context for the LLM)
     const allFaqs = [
       ...Object.values(greetingResponses),
-      ...Object.values(linoAIResponses)
+      ...Object.values(linoAIResponses),
     ].join(" ");
 
-    // Always send to LLM with the dictionary
+    // Call LLM with the dictionary as background knowledge
     try {
       if (!process.env.OPENROUTER_API_KEY) {
-        throw new Error("OPENROUTER_API_KEY not set in environment");
+        console.error("OPENROUTER_API_KEY not set in environment");
+        return {
+          statusCode: 200,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            reply: "I can't reach my AI brain right now, but I can still chat about Lino.AI, Linus, and our services. Ask me something specific about those and I'll do my best to answer.",
+            context: [],
+            source: "no-api-key",
+          }),
+        };
       }
       
       const systemPrompt = `You are Lino.AI Assistant. Only identify yourself as Lino.AI Assistant if the user explicitly asks who you are or similar. Never say you are a language model, AI model, or mention Mistral or any other provider. Never say you were created by Mistral or anyone else. You must answer using ONLY the official information provided below. If the information is not available in the provided knowledge base, politely respond that you do not have information about that topic. Do not speculate or invent information.`;
