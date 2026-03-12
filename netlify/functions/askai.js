@@ -26,9 +26,7 @@ exports.handler = async function (event, context) {
       };
     }
 
-    // Rule-based responses for common greetings
-    const normalizedMessage = normalize(userMessage);
-    
+    // Knowledge base for context
     const greetingResponses = {
       "who are you": "I'm Lino.AI assistant. How can I help you?",
       "who are you?": "I'm Lino.AI assistant. How can I help you?",
@@ -42,7 +40,7 @@ exports.handler = async function (event, context) {
       "good evening": "Good evening! I'm Lino.AI assistant. How can I help you?"
     };
     
-    // Cached responses for common Lino.AI questions
+    // Knowledge base for common Lino.AI questions
     const linoAIResponses = {
       "what is lino.ai": "Lino.AI is a technology company led by Ireri Linus Mugendi, specializing in chatbot engineering, AI integration, LLM hosting, fine-tuning, and Retrieval-Augmented Generation (RAG) implementation.",
       "what does lino.ai do": "Lino.AI specializes in chatbot engineering, AI integration, LLM hosting, fine-tuning, Retrieval-Augmented Generation (RAG) implementation using graph knowledge vector databases, website creation, and all aspects of software engineering.",
@@ -70,40 +68,7 @@ exports.handler = async function (event, context) {
       "who was mathematics club chairman": "Linus was the chairman of the Mathematics Club from 2021 to 2023."
     };
 
-    // First try to answer using built-in rule-based responses
-    const possibleReplies = new Set();
-
-    const tryMatchFrom = (entries) => {
-      for (const [key, value] of Object.entries(entries)) {
-        const normKey = normalize(key);
-        if (
-          normalizedMessage === normKey ||
-          normalizedMessage.includes(normKey) ||
-          normKey.includes(normalizedMessage)
-        ) {
-          possibleReplies.add(value);
-        }
-      }
-    };
-
-    tryMatchFrom(greetingResponses);
-    tryMatchFrom(linoAIResponses);
-
-    const repliesArray = Array.from(possibleReplies);
-
-    if (repliesArray.length > 0) {
-      return {
-        statusCode: 200,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          reply: repliesArray.join(" "),
-          context: [],
-          source: "rules",
-        }),
-      };
-    }
-
-    // Combine all dictionary information (used as background context for the LLM)
+    // Combine all dictionary information for LLM context
     const allFaqs = [
       ...Object.values(greetingResponses),
       ...Object.values(linoAIResponses),
@@ -124,7 +89,15 @@ exports.handler = async function (event, context) {
         };
       }
       
-      const systemPrompt = `You are Lino.AI Assistant. Only identify yourself as Lino.AI Assistant if the user explicitly asks who you are or similar. Never say you are a language model, AI model, or mention Mistral or any other provider. Never say you were created by Mistral or anyone else. You must answer using ONLY the official information provided below. If the information is not available in the provided knowledge base, politely respond that you do not have information about that topic. Do not speculate or invent information. Maintain a conversational memory across the provided previous messages so that follow-up questions like "really?" or "tell me more" are answered in the context of the prior exchange.`;
+      const systemPrompt = `You are Lino.AI Assistant. Only identify yourself as Lino.AI Assistant if the user explicitly asks who you are or similar. Never say you are a language model, AI model, or mention Mistral or any other provider. Never say you were created by Mistral or anyone else. 
+
+You specialize in answering questions about Lino.AI, Ireri Linus Mugendi, and related services. Use the official information provided below as your primary knowledge base.
+
+For questions about Lino.AI, Linus, or services: Answer using ONLY the official information provided. Do not speculate or invent information.
+
+For off-topic questions (unrelated to Lino.AI, Linus, or Ireri Mugendi): Politely acknowledge the question, but gracefully redirect the user back to what you can help with. For example: "That's an interesting question, but I'm specifically here to help with information about Lino.AI and Linus. Is there anything about those topics I can help you with?"
+
+Maintain a conversational memory across the provided previous messages so that follow-up questions like "really?" or "tell me more" are answered in the context of the prior exchange.`;
 
       // Map frontend conversation context into LLM chat history
       const historyMessages = contextMessages
