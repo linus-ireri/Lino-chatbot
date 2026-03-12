@@ -1,5 +1,9 @@
 const axios = require("axios");
 
+// Retry configuration
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 1000; // Start with 1 second
+
 exports.handler = async function (event, context) {
   if (event.httpMethod !== "POST") {
     return {
@@ -64,163 +68,94 @@ exports.handler = async function (event, context) {
       "who was mathematics club chairman": "Linus was the chairman of the Mathematics Club from 2021 to 2023."
     };
 
+    // Combine all dictionary information
+    const allFaqs = [
+      ...Object.values(greetingResponses),
+      ...Object.values(linoAIResponses)
+    ].join(" ");
 
-    
-    // Check for exact matches first (normalized)
-    if (greetingResponses[normalizedMessage]) {
-      return {
-        statusCode: 200,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          reply: greetingResponses[normalizedMessage],
-          context: [],
-          source: "rule-based"
-        }),
-      };
-    }
-    
-    // Check for Lino.AI questions (case-insensitive)
-    for (const [key, response] of Object.entries(linoAIResponses)) {
-      if (normalizedMessage.includes(normalize(key))) {
-        return {
-          statusCode: 200,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            reply: response,
-            context: [],
-            source: "cached"
-          }),
-        };
-      }
-    }
-
-    // Query RAG server without separate health check
+    // Always send to LLM with the dictionary
     try {
-      const ragServerUrl = process.env.RAG_SERVER_URL;
-      console.log("RAG_SERVER_URL:", ragServerUrl);
-      if (!ragServerUrl) {
-        throw new Error("RAG_SERVER_URL not configured");
+      if (!process.env.OPENROUTER_API_KEY) {
+        throw new Error("OPENROUTER_API_KEY not set in environment");
       }
+      
+      const systemPrompt = `You are Lino.AI Assistant. Only identify yourself as Lino.AI Assistant if the user explicitly asks who you are or similar. Never say you are a language model, AI model, or mention Mistral or any other provider. Never say you were created by Mistral or anyone else. You must answer using ONLY the official information provided below. If the information is not available in the provided knowledge base, politely respond that you do not have information about that topic. Do not speculate or invent information.`;
+      
+      const messages = [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `Here is the official information about Lino.AI and myself:\n\n${allFaqs}` },
+        { role: "user", content: userMessage }
+      ];
 
-      const ragUrl = ragServerUrl.replace('/ask', '/rag');
-      const ragResponse = await axios.post(
-        ragUrl,
-        { question: userMessage },
-        { timeout: 5000 }
-      );
+      let answer;
+      let lastError;
 
-      // If RAG returns an answer, use it immediately.
-      if (ragResponse.data && ragResponse.data.answer) {
-        return {
-          statusCode: 200,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            reply: ragResponse.data.answer,
-            context: ragResponse.data.context,
-            source: "rag"
-          }),
-        };
-      }
-
-      // If RAG has context but no direct answer, pass that context to the LLM.
-      const retrievedContext = ragResponse.data && ragResponse.data.context;
-      if (retrievedContext) {
+      // Retry logic with exponential backoff
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         try {
-          if (!process.env.OPENROUTER_API_KEY) {
-            throw new Error("OPENROUTER_API_KEY not set in environment");
-          }
-          const systemPrompt = `You are Lino.AI Assistant. Only identify yourself as Lino.AI Assistant if the user explicitly asks who you are or similar. Never say you are a language model, AI model, or mention Mistral or any other provider. Never say you were created by Mistral or anyone else. You must answer using ONLY the retrieved context provided below. Do not speculate or invent information.`;
-          const messages = [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: `Retrieved context: ${Array.isArray(retrievedContext) ? retrievedContext.join(" ") : retrievedContext}` },
-            { role: "user", content: userMessage }
-          ];
+          console.log(`API attempt ${attempt + 1}/${MAX_RETRIES}`);
+          
           const response = await axios.post(
             "https://openrouter.ai/api/v1/chat/completions",
-            { model: "mistralai/mistral-small-3.2-24b-instruct:free", messages },
+            {
+              model: "arcee-ai/trinity-large-preview:free", // Using a more reliable model with better rate limits
+              messages
+            },
             {
               headers: {
                 "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
                 "Content-Type": "application/json"
               },
-              timeout: 3000
+              timeout: 15000
             }
           );
-          const answer = response.data.choices?.[0]?.message?.content?.trim();
-          return {
-            statusCode: 200,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              reply: answer || "Sorry, I do not have official information on that topic.",
-              context: retrievedContext,
-              source: "rag+llm"
-            }),
-          };
-        } catch (llmError) {
-          console.error("LLM fallback error:", llmError);
-          return {
-            statusCode: 200,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              reply: "Sorry, I do not have official information on that topic.",
-              context: retrievedContext,
-              source: "rag+llm-fallback"
-            }),
-          };
+
+          answer = response.data.choices?.[0]?.message?.content?.trim();
+          console.log(`API success on attempt ${attempt + 1}`);
+          break; // Success, exit retry loop
+        } catch (error) {
+          lastError = error;
+          const statusCode = error.response?.status;
+          
+          console.error(`Attempt ${attempt + 1} failed - Status: ${statusCode}, Error: ${error.message}`);
+          
+          // If it's a 429 (rate limit) or 5xx error, retry
+          if ((statusCode === 429 || statusCode >= 500) && attempt < MAX_RETRIES - 1) {
+            const delayMs = RETRY_DELAY * Math.pow(2, attempt); // Exponential backoff: 1s, 2s, 4s
+            console.log(`Rate limited/server error. Waiting ${delayMs}ms before retry...`);
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+            continue;
+          }
+          
+          // If it's the last attempt or a non-retryable error, throw
+          if (attempt === MAX_RETRIES - 1) {
+            throw error;
+          }
         }
       }
-      // If no context or answer from RAG, fall through to broad FAQ LLM fallback handled below.
-    } catch (ragError) {
-      console.error("RAG error:", ragError);
-      // Continue to broad FAQ fallback.
-    }
-    // FAQ/cached info fallback (outermost catch block)
-    const allFaqs = [
-      ...Object.values(greetingResponses),
-      ...Object.values(linoAIResponses)
-    ].join(" ");
-    try {
-      if (!process.env.OPENROUTER_API_KEY) {
-        throw new Error("OPENROUTER_API_KEY not set in environment");
-      }
-      const systemPrompt = `You are Lino.AI Assistant. Only identify yourself as Lino.AI Assistant if the user explicitly asks who you are or similar. Never say you are a language model, AI model, or mention Mistral or any other provider. Never say you were created by Mistral or anyone else. You must answer using ONLY the official information provided below. Do not speculate, do not introduce yourself, do not use general knowledge, and do not say you don't know if the information is present. If the information is not present, say you do not have official information. Always try to follow up on the current conversation and maintain context if possible.`;
-      const messages = [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: `Official information: ${allFaqs}` },
-        { role: "user", content: userMessage }
-      ];
-      const response = await axios.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        {
-          model: "mistralai/mistral-small-3.2-24b-instruct:free",
-          messages
-        },
-        {
-          headers: {
-            "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
-            "Content-Type": "application/json"
-          },
-          timeout: 3000 // 3 seconds timeout for LLM fallback
-        }
-      );
-      const answer = response.data.choices?.[0]?.message?.content?.trim();
+      
       return {
         statusCode: 200,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          reply: answer || "Sorry, I do not have official information on that topic.",
+          reply: answer || "I appreciate your question, but I don't have information about that topic.",
           context: [],
-          source: "llm-fallback"
+          source: "llm"
         }),
       };
     } catch (llmError) {
+      console.error("LLM error after retries:", llmError.message);
+      console.error("Error status:", llmError.response?.status);
+      console.error("Error data:", llmError.response?.data);
+      
       return {
         statusCode: 200,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          reply: "I'm experiencing high traffic right now and can't answer this question at the moment. Please try again in a few minutes!",
+          reply: "I'm experiencing some technical difficulties right now. Please try again in a moment.",
           context: [],
-          source: "rule-fallback"
+          source: "error-fallback"
         }),
       };
     }
