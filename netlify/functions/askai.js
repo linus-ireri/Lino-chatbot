@@ -90,7 +90,7 @@ exports.handler = async function (event, context) {
 
       let answer;
       let lastError;
-      
+
 
       // Retry logic with exponential backoff
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -117,7 +117,7 @@ exports.handler = async function (event, context) {
           console.log(`API success on attempt ${attempt + 1}`);
           break; // Success, exit retry loop
         } catch (error) {
-          lastError = error;git
+          lastError = error;
           const statusCode = error.response?.status;
           
           console.error(`Attempt ${attempt + 1} failed - Status: ${statusCode}, Error: ${error.message}`);
