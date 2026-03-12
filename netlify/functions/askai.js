@@ -13,9 +13,11 @@ exports.handler = async function (event, context) {
   }
 
   let userMessage = "";
+  let contextMessages = [];
   try {
     const body = JSON.parse(event.body || "{}");
     userMessage = body.message?.trim();
+    contextMessages = Array.isArray(body.context) ? body.context : [];
 
     if (!userMessage || typeof userMessage !== "string") {
       return {
@@ -69,7 +71,7 @@ exports.handler = async function (event, context) {
     };
 
     // First try to answer using built-in rule-based responses
-    const possibleReplies = [];
+    const possibleReplies = new Set();
 
     const tryMatchFrom = (entries) => {
       for (const [key, value] of Object.entries(entries)) {
@@ -79,7 +81,7 @@ exports.handler = async function (event, context) {
           normalizedMessage.includes(normKey) ||
           normKey.includes(normalizedMessage)
         ) {
-          possibleReplies.push(value);
+          possibleReplies.add(value);
         }
       }
     };
@@ -87,12 +89,14 @@ exports.handler = async function (event, context) {
     tryMatchFrom(greetingResponses);
     tryMatchFrom(linoAIResponses);
 
-    if (possibleReplies.length > 0) {
+    const repliesArray = Array.from(possibleReplies);
+
+    if (repliesArray.length > 0) {
       return {
         statusCode: 200,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          reply: possibleReplies.join(" "),
+          reply: repliesArray.join(" "),
           context: [],
           source: "rules",
         }),
@@ -120,11 +124,24 @@ exports.handler = async function (event, context) {
         };
       }
       
-      const systemPrompt = `You are Lino.AI Assistant. Only identify yourself as Lino.AI Assistant if the user explicitly asks who you are or similar. Never say you are a language model, AI model, or mention Mistral or any other provider. Never say you were created by Mistral or anyone else. You must answer using ONLY the official information provided below. If the information is not available in the provided knowledge base, politely respond that you do not have information about that topic. Do not speculate or invent information.`;
+      const systemPrompt = `You are Lino.AI Assistant. Only identify yourself as Lino.AI Assistant if the user explicitly asks who you are or similar. Never say you are a language model, AI model, or mention Mistral or any other provider. Never say you were created by Mistral or anyone else. You must answer using ONLY the official information provided below. If the information is not available in the provided knowledge base, politely respond that you do not have information about that topic. Do not speculate or invent information. Maintain a conversational memory across the provided previous messages so that follow-up questions like "really?" or "tell me more" are answered in the context of the prior exchange.`;
+
+      // Map frontend conversation context into LLM chat history
+      const historyMessages = contextMessages
+        .map((m) => {
+          if (!m || !m.role || !m.content) return null;
+          const role = m.role === "bot" || m.role === "assistant" ? "assistant" : "user";
+          return {
+            role,
+            content: m.content,
+          };
+        })
+        .filter(Boolean);
       
       const messages = [
         { role: "system", content: systemPrompt },
-        { role: "user", content: `Here is the official information about Lino.AI and myself:\n\n${allFaqs}` },
+        { role: "system", content: `Here is the official information about Lino.AI and myself. Use it as ground truth and do not invent facts:\n\n${allFaqs}` },
+        ...historyMessages,
         { role: "user", content: userMessage }
       ];
 
