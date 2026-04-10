@@ -1,11 +1,12 @@
 const axios = require("axios");
 
 // Retry configuration
-const MAX_RETRIES = 3;
-const RETRY_DELAY = 1000; // Start with 1 second
+const MAX_RETRIES = 2; // Reduced from 3 to prevent timeout
+const RETRY_DELAY = 500; // Reduced from 1000ms to 500ms
 
 exports.handler = async function (event, context) {
-  if (event.httpMethod !== "POST") {
+  const startTime = Date.now();
+  const NETLIFY_TIMEOUT = 9000; // 9 seconds to leave buffer
     return {
       statusCode: 405,
       body: JSON.stringify({ error: "Method Not Allowed. Use POST instead." }),
@@ -76,8 +77,8 @@ exports.handler = async function (event, context) {
 
     // Call LLM with the dictionary as background knowledge
     try {
-      if (!process.env.OPENROUTER_API_KEY) {
-        console.error("OPENROUTER_API_KEY not set in environment");
+      if (!process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY.length < 10) {
+        console.error("OPENROUTER_API_KEY not set or invalid in environment");
         return {
           statusCode: 200,
           headers: { "Content-Type": "application/json" },
@@ -124,13 +125,27 @@ Maintain a conversational memory across the provided previous messages so that f
 
       // Retry logic with exponential backoff
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        // Check if we're approaching Netlify's timeout
+        if (Date.now() - startTime > NETLIFY_TIMEOUT) {
+          console.log("Approaching Netlify timeout, using fallback response");
+          return {
+            statusCode: 200,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              reply: "I'm taking a bit longer than expected to respond. Please try asking again.",
+              context: [],
+              source: "timeout-fallback",
+            }),
+          };
+        }
+        
         try {
           console.log(`API attempt ${attempt + 1}/${MAX_RETRIES}`);
           
           const response = await axios.post(
             "https://openrouter.ai/api/v1/chat/completions",
             {
-              model: "arcee-ai/trinity-large-preview:free", // Using a more reliable model with better rate limits
+              model: "microsoft/wizardlm-2-8x22b:free", // Changed to a more stable free model
               messages
             },
             {
@@ -138,7 +153,7 @@ Maintain a conversational memory across the provided previous messages so that f
                 "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
                 "Content-Type": "application/json"
               },
-              timeout: 15000
+              timeout: 8000 // Reduced from 15000ms to 8000ms to stay within Netlify's 10s limit
             }
           );
 
@@ -154,10 +169,16 @@ Maintain a conversational memory across the provided previous messages so that f
           
           // If it's a 429 (rate limit) or 5xx error, retry
           if ((statusCode === 429 || statusCode >= 500) && attempt < MAX_RETRIES - 1) {
-            const delayMs = RETRY_DELAY * Math.pow(2, attempt); // Exponential backoff: 1s, 2s, 4s
+            const delayMs = RETRY_DELAY * Math.pow(2, attempt); // Exponential backoff: 0.5s, 1s, 2s
             console.log(`Rate limited/server error. Waiting ${delayMs}ms before retry...`);
             await new Promise(resolve => setTimeout(resolve, delayMs));
             continue;
+          }
+          
+          // For client errors (4xx except 429), don't retry
+          if (statusCode >= 400 && statusCode < 500 && statusCode !== 429) {
+            console.log(`Client error ${statusCode}, not retrying`);
+            throw error;
           }
           
           // If it's the last attempt or a non-retryable error, throw
@@ -181,11 +202,24 @@ Maintain a conversational memory across the provided previous messages so that f
       console.error("Error status:", llmError.response?.status);
       console.error("Error data:", llmError.response?.data);
       
+      let errorMessage = "I'm experiencing some technical difficulties right now. Please try again in a moment.";
+      
+      // Provide more specific error messages
+      if (llmError.response?.status === 401) {
+        errorMessage = "There seems to be an authentication issue with my AI service. Please contact support.";
+      } else if (llmError.response?.status === 429) {
+        errorMessage = "I'm receiving too many requests right now. Please wait a moment and try again.";
+      } else if (llmError.response?.status >= 500) {
+        errorMessage = "The AI service is temporarily unavailable. Please try again later.";
+      } else if (llmError.code === 'ECONNABORTED') {
+        errorMessage = "The request timed out. Please try again.";
+      }
+      
       return {
         statusCode: 200,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          reply: "I'm experiencing some technical difficulties right now. Please try again in a moment.",
+          reply: errorMessage,
           context: [],
           source: "error-fallback",
           error: {
