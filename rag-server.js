@@ -48,40 +48,97 @@ app.post('/rag', async (req, res) => {
     const context = results.map((doc, i) => `Context #${i + 1}:\n${doc.pageContent}`);
     const prompt = `You are an AI assistant. Use the following context to answer the user's question.\n\n${context.join("\n\n")}\n\nUser question: ${question}\n\nAnswer:`;
 
-    // LLM call
+    // LLM call with same model and error handling as askai.js
     const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: 'OPENROUTER_API_KEY not set in environment' });
+    if (!apiKey || apiKey.length < 10) {
+      return res.status(500).json({ error: 'OPENROUTER_API_KEY not set or invalid in environment' });
     }
+    
+    const systemPrompt = `You are Lino.AI Assistant. Only identify yourself as Lino.AI Assistant if the user explicitly asks who you are or similar. Never say you are a language model, AI model, or mention Mistral or any other provider. Never say you were created by Mistral or anyone else.
+
+You are a helpful AI assistant that answers questions using the provided context. Use ONLY the context information to answer the user's question. If the information is not in the context, say you don't have enough information to answer that question.`;
+
     const messages = [
-      { role: "system", content: "You are a helpful AI assistant." },
+      { role: "system", content: systemPrompt },
       { role: "user", content: prompt }
     ];
+    
+    // Retry configuration (same as askai.js)
+    const MAX_RETRIES = 2;
+    const RETRY_DELAY = 500;
+    
     let answer = "";
-    try {
-      const response = await axios.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        {
-          model: "mistralai/mistral-small-3.2-24b-instruct:free",
-          messages
-        },
-        {
-          headers: {
-            "Authorization": `Bearer ${apiKey}`,
-            "Content-Type": "application/json"
+    let lastError;
+    
+    // Retry logic with exponential backoff
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        console.log(`RAG API attempt ${attempt + 1}/${MAX_RETRIES}`);
+        
+        const response = await axios.post(
+          "https://openrouter.ai/api/v1/chat/completions",
+          {
+            model: "cohere/rerank-4-fast", // Same model as askai.js
+            messages
           },
-          timeout: 20000
+          {
+            headers: {
+              "Authorization": `Bearer ${apiKey}`,
+              "Content-Type": "application/json"
+            },
+            timeout: 8000 // Same timeout as askai.js
+          }
+        );
+
+        answer = response.data.choices?.[0]?.message?.content?.trim() || "[No answer returned]";
+        console.log(`RAG API success on attempt ${attempt + 1}`);
+        break; // Success, exit retry loop
+      } catch (error) {
+        lastError = error;
+        const statusCode = error.response?.status;
+        
+        console.error(`RAG attempt ${attempt + 1} failed - Status: ${statusCode}, Error: ${error.message}`);
+        
+        // If it's a 429 (rate limit) or 5xx error, retry
+        if ((statusCode === 429 || statusCode >= 500) && attempt < MAX_RETRIES - 1) {
+          const delayMs = RETRY_DELAY * Math.pow(2, attempt); // Exponential backoff: 0.5s, 1s
+          console.log(`Rate limited/server error. Waiting ${delayMs}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          continue;
         }
-      );
-      answer = response.data.choices?.[0]?.message?.content || "[No answer returned]";
-    } catch (llmErr) {
-      console.error('OpenRouter LLM error:', llmErr.response?.data || llmErr.message);
-      return res.status(500).json({ error: 'LLM call failed', details: llmErr.response?.data || llmErr.message });
+        
+        // For client errors (4xx except 429), don't retry
+        if (statusCode >= 400 && statusCode < 500 && statusCode !== 429) {
+          console.log(`Client error ${statusCode}, not retrying`);
+          throw error;
+        }
+        
+        // If it's the last attempt or a non-retryable error, throw
+        if (attempt === MAX_RETRIES - 1) {
+          throw error;
+        }
+      }
     }
+    
     res.json({ context, prompt, answer });
   } catch (err) {
     console.error('RAG error:', err);
-    res.status(500).json({ error: 'RAG retrieval failed' });
+    
+    // Provide more specific error messages
+    let errorMessage = 'RAG retrieval failed';
+    let statusCode = 500;
+    
+    if (err.response?.status === 401) {
+      errorMessage = 'Authentication issue with AI service';
+    } else if (err.response?.status === 429) {
+      errorMessage = 'Too many requests to AI service';
+    } else if (err.response?.status >= 500) {
+      errorMessage = 'AI service temporarily unavailable';
+    } else if (err.code === 'ECONNABORTED') {
+      errorMessage = 'Request to AI service timed out';
+    }
+    
+    res.status(statusCode).json({ error: errorMessage, details: err.message });
   }
 });
 
