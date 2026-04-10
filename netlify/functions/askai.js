@@ -7,6 +7,8 @@ const RETRY_DELAY = 500; // Reduced from 1000ms to 500ms
 exports.handler = async function (event, context) {
   const startTime = Date.now();
   const NETLIFY_TIMEOUT = 9000; // 9 seconds to leave buffer
+  
+  if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
       body: JSON.stringify({ error: "Method Not Allowed. Use POST instead." }),
@@ -145,7 +147,7 @@ Maintain a conversational memory across the provided previous messages so that f
           const response = await axios.post(
             "https://openrouter.ai/api/v1/chat/completions",
             {
-              model: "microsoft/wizardlm-2-8x22b:free", // Changed to a more stable free model
+              model: "cohere/rerank-4-fast", // Changed to a more stable free model
               messages
             },
             {
@@ -236,7 +238,7 @@ Maintain a conversational memory across the provided previous messages so that f
       body: JSON.stringify({ error: "Unexpected error", details: error.message }),
     };
   }
-}
+};
 
 function normalize(text) {
   return text.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
