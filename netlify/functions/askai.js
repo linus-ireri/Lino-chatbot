@@ -130,7 +130,7 @@ Maintain a conversational memory across the provided previous messages so that f
           const response = await axios.post(
             "https://openrouter.ai/api/v1/chat/completions",
             {
-              model: "arcee-ai/trinity-large-preview:free", // Using a more reliable model with better rate limits
+              model: "tencent/hy3-preview:free", // Using a more reliable model with better rate limits
               messages
             },
             {

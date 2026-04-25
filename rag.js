@@ -35,7 +35,7 @@ async function main() {
     const response = await axios.post(
       "https://openrouter.ai/api/v1/chat/completions",
       {
-        model: "mistralai/mistral-small-3.2-24b-instruct:free",
+        model: "tencent/hy3-preview:free",
         messages
       },
       {
